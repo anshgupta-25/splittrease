@@ -11,11 +11,13 @@ import {
   TrendingDown,
   Wallet,
   MoreVertical,
-  UserPlus
+  UserPlus,
+  Shield
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Badge } from '@/components/ui/badge';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -23,9 +25,14 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Header } from '@/components/layout/Header';
+import { InviteMemberDialog } from '@/components/groups/InviteMemberDialog';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/integrations/supabase/client';
 import type { Group, Expense, Profile } from '@/types/database';
+
+interface MemberWithRole extends Profile {
+  role: string;
+}
 
 export default function GroupDetail() {
   const { id } = useParams<{ id: string }>();
@@ -33,8 +40,10 @@ export default function GroupDetail() {
   const { user, loading: authLoading } = useAuth();
   const [group, setGroup] = useState<Group | null>(null);
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [members, setMembers] = useState<Profile[]>([]);
+  const [members, setMembers] = useState<MemberWithRole[]>([]);
   const [loading, setLoading] = useState(true);
+  const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -71,10 +80,10 @@ export default function GroupDetail() {
 
       setExpenses((expensesData as Expense[]) || []);
 
-      // Fetch members
+      // Fetch members with roles
       const { data: membersData } = await supabase
         .from('group_members')
-        .select('user_id')
+        .select('user_id, role')
         .eq('group_id', id);
 
       if (membersData && membersData.length > 0) {
@@ -84,7 +93,20 @@ export default function GroupDetail() {
           .select('*')
           .in('id', userIds);
         
-        setMembers((profiles as Profile[]) || []);
+        // Merge profiles with roles
+        const membersWithRoles: MemberWithRole[] = (profiles || []).map(profile => {
+          const memberData = membersData.find(m => m.user_id === profile.id);
+          return {
+            ...profile,
+            role: memberData?.role || 'member'
+          } as MemberWithRole;
+        });
+        
+        setMembers(membersWithRoles);
+        
+        // Check if current user is admin
+        const currentUserMember = membersData.find(m => m.user_id === user?.id);
+        setIsAdmin(currentUserMember?.role === 'admin');
       }
     } catch (error) {
       console.error('Error fetching group:', error);
@@ -138,9 +160,15 @@ export default function GroupDetail() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="icon">
-                <UserPlus className="h-4 w-4" />
-              </Button>
+              {isAdmin && (
+                <Button 
+                  variant="outline" 
+                  size="icon"
+                  onClick={() => setInviteDialogOpen(true)}
+                >
+                  <UserPlus className="h-4 w-4" />
+                </Button>
+              )}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="icon">
@@ -156,6 +184,17 @@ export default function GroupDetail() {
               </DropdownMenu>
             </div>
           </div>
+
+          {/* Invite Dialog */}
+          {group && (
+            <InviteMemberDialog
+              groupId={group.id}
+              groupName={group.name}
+              open={inviteDialogOpen}
+              onOpenChange={setInviteDialogOpen}
+              onInviteSent={fetchGroupData}
+            />
+          )}
 
           {/* Balance Cards */}
           <div className="grid gap-4 md:grid-cols-3">
@@ -311,11 +350,17 @@ export default function GroupDetail() {
                             <p className="text-sm text-muted-foreground">{member.email}</p>
                           </div>
                         </div>
-                        {member.id === group.owner_id && (
-                          <span className="text-xs font-medium px-2 py-1 rounded-full bg-primary/10 text-primary">
-                            Owner
-                          </span>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {member.role === 'admin' && (
+                            <Badge variant="default" className="gap-1">
+                              <Shield className="h-3 w-3" />
+                              Admin
+                            </Badge>
+                          )}
+                          {member.id === group.owner_id && (
+                            <Badge variant="secondary">Owner</Badge>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>

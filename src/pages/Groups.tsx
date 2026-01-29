@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Header } from '@/components/layout/Header';
+import { PendingInvitations } from '@/components/groups/PendingInvitations';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/integrations/supabase/client';
 import type { Group } from '@/types/database';
@@ -120,6 +121,9 @@ export default function Groups() {
               className="pl-10"
             />
           </div>
+
+          {/* Pending Invitations */}
+          <PendingInvitations />
 
           {/* Groups Grid */}
           {loadingData ? (
