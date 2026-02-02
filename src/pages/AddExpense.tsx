@@ -5,7 +5,6 @@ import {
   ArrowLeft,
   DollarSign,
   Calendar,
-  Tag,
   FileText,
   Users,
   Loader2,
@@ -25,10 +24,12 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Header } from '@/components/layout/Header';
+import { MemberSelector } from '@/components/expenses/MemberSelector';
+import { PaidBySelector } from '@/components/expenses/PaidBySelector';
 import { useAuth } from '@/lib/auth';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
-import type { Group, Currency } from '@/types/database';
+import type { Group, Currency, Profile } from '@/types/database';
 
 const categories = [
   { id: 'food', label: 'Food & Drinks', icon: '🍕' },
@@ -54,6 +55,7 @@ export default function AddExpense() {
   const [loading, setLoading] = useState(false);
   const [groups, setGroups] = useState<Group[]>([]);
   const [currencies, setCurrencies] = useState<Currency[]>([]);
+  const [groupMembers, setGroupMembers] = useState<Profile[]>([]);
   const [loadingData, setLoadingData] = useState(true);
 
   const [formData, setFormData] = useState({
@@ -65,11 +67,28 @@ export default function AddExpense() {
     currency_id: '',
     split_type: 'equal' as 'equal' | 'custom' | 'percentage',
     notes: '',
+    paid_by: '',
   });
+
+  const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
+  const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({});
 
   useEffect(() => {
     fetchData();
   }, []);
+
+  useEffect(() => {
+    if (formData.group_id) {
+      fetchGroupMembers(formData.group_id);
+    }
+  }, [formData.group_id]);
+
+  // Set paid_by to current user when user is loaded
+  useEffect(() => {
+    if (user?.uid && !formData.paid_by) {
+      setFormData(prev => ({ ...prev, paid_by: user.uid }));
+    }
+  }, [user?.uid]);
 
   const fetchData = async () => {
     try {
@@ -81,7 +100,6 @@ export default function AddExpense() {
       if (groupsRes.data) setGroups(groupsRes.data as Group[]);
       if (currenciesRes.data) {
         setCurrencies(currenciesRes.data as Currency[]);
-        // Set default currency to USD
         const usd = currenciesRes.data.find(c => c.code === 'USD');
         if (usd) {
           setFormData(prev => ({ ...prev, currency_id: usd.id }));
@@ -91,6 +109,34 @@ export default function AddExpense() {
       console.error('Error fetching data:', error);
     } finally {
       setLoadingData(false);
+    }
+  };
+
+  const fetchGroupMembers = async (groupId: string) => {
+    try {
+      const { data: membersData } = await supabase
+        .from('group_members')
+        .select('user_id')
+        .eq('group_id', groupId);
+
+      if (membersData && membersData.length > 0) {
+        const userIds = membersData.map(m => m.user_id);
+        const { data: profiles } = await supabase
+          .from('profiles')
+          .select('*')
+          .in('id', userIds);
+
+        if (profiles) {
+          setGroupMembers(profiles as Profile[]);
+          // Auto-select all members for equal split
+          setSelectedMembers(profiles.map(p => p.id));
+        }
+      } else {
+        setGroupMembers([]);
+        setSelectedMembers([]);
+      }
+    } catch (error) {
+      console.error('Error fetching group members:', error);
     }
   };
 
@@ -124,6 +170,53 @@ export default function AddExpense() {
       return;
     }
 
+    if (!formData.paid_by) {
+      toast({
+        title: 'Payer required',
+        description: 'Please select who paid for this expense',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    if (selectedMembers.length === 0) {
+      toast({
+        title: 'Select members',
+        description: 'Please select at least one member to split with',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    // Validate custom amounts or percentages
+    if (formData.split_type === 'custom') {
+      const totalAssigned = selectedMembers.reduce((sum, id) => {
+        return sum + (parseFloat(customAmounts[id]) || 0);
+      }, 0);
+      if (Math.abs(totalAssigned - parseFloat(formData.amount)) > 0.01) {
+        toast({
+          title: 'Amounts don\'t match',
+          description: 'Custom amounts must equal the total expense amount',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
+
+    if (formData.split_type === 'percentage') {
+      const totalPercent = selectedMembers.reduce((sum, id) => {
+        return sum + (parseFloat(customAmounts[id]) || 0);
+      }, 0);
+      if (Math.abs(totalPercent - 100) > 0.01) {
+        toast({
+          title: 'Percentages don\'t add up',
+          description: 'Percentages must total 100%',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
+
     setLoading(true);
 
     try {
@@ -139,23 +232,41 @@ export default function AddExpense() {
           currency_id: formData.currency_id,
           split_type: formData.split_type,
           notes: formData.notes.trim() || null,
-          paid_by: user?.id,
+          paid_by: formData.paid_by,
         })
         .select()
         .single();
 
       if (expenseError) throw expenseError;
 
-      // Create expense split for the current user (equal split for now)
-      // In a full implementation, you would add splits for all group members
+      // Calculate and create expense splits
+      const totalAmount = parseFloat(formData.amount);
+      const splits = selectedMembers.map(userId => {
+        let splitAmount: number;
+        let percentage: number | null = null;
+
+        if (formData.split_type === 'equal') {
+          splitAmount = totalAmount / selectedMembers.length;
+          percentage = 100 / selectedMembers.length;
+        } else if (formData.split_type === 'custom') {
+          splitAmount = parseFloat(customAmounts[userId]) || 0;
+          percentage = (splitAmount / totalAmount) * 100;
+        } else {
+          percentage = parseFloat(customAmounts[userId]) || 0;
+          splitAmount = (percentage / 100) * totalAmount;
+        }
+
+        return {
+          expense_id: expense.id,
+          user_id: userId,
+          amount: splitAmount,
+          percentage: percentage,
+        };
+      });
+
       const { error: splitError } = await supabase
         .from('expense_splits')
-        .insert({
-          expense_id: expense.id,
-          user_id: user?.id,
-          amount: parseFloat(formData.amount),
-          percentage: 100,
-        });
+        .insert(splits);
 
       if (splitError) throw splitError;
 
@@ -355,6 +466,31 @@ export default function AddExpense() {
                     })}
                   </div>
                 </div>
+
+                {/* Paid By */}
+                {groupMembers.length > 0 && (
+                  <PaidBySelector
+                    members={groupMembers}
+                    selectedPayer={formData.paid_by}
+                    onPayerChange={(payerId) => setFormData({ ...formData, paid_by: payerId })}
+                    currentUserId={user?.uid || ''}
+                  />
+                )}
+
+                {/* Member Selection for Split */}
+                {groupMembers.length > 0 && (
+                  <MemberSelector
+                    members={groupMembers}
+                    selectedMembers={selectedMembers}
+                    onSelectionChange={setSelectedMembers}
+                    splitType={formData.split_type}
+                    customAmounts={customAmounts}
+                    onCustomAmountChange={(userId, amount) => {
+                      setCustomAmounts(prev => ({ ...prev, [userId]: amount }));
+                    }}
+                    totalAmount={parseFloat(formData.amount) || 0}
+                  />
+                )}
 
                 {/* Notes */}
                 <div className="space-y-2">

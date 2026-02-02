@@ -62,7 +62,7 @@ export default function NewGroup() {
           name: formData.name.trim(),
           description: formData.description.trim() || null,
           category: formData.category,
-          owner_id: user?.id,
+          owner_id: user?.uid,
         })
         .select()
         .single();
