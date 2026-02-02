@@ -100,7 +100,7 @@ export function InviteMemberDialog({
         .insert({
           group_id: groupId,
           email: email.trim().toLowerCase(),
-          invited_by: user.id,
+          invited_by: user.uid,
           role: role,
         });
 

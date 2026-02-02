@@ -28,7 +28,8 @@ import { Header } from '@/components/layout/Header';
 import { InviteMemberDialog } from '@/components/groups/InviteMemberDialog';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/integrations/supabase/client';
-import type { Group, Expense, Profile } from '@/types/database';
+import { BalanceCard } from '@/components/settlements/BalanceCard';
+import type { Group, Expense, Profile, Currency, ExpenseSplit } from '@/types/database';
 
 interface MemberWithRole extends Profile {
   role: string;
@@ -44,6 +45,9 @@ export default function GroupDetail() {
   const [loading, setLoading] = useState(true);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [balances, setBalances] = useState<{ person: Profile; amount: number; direction: 'owe' | 'owed' }[]>([]);
+  const [defaultCurrency, setDefaultCurrency] = useState<Currency | null>(null);
+  const [currentUserProfile, setCurrentUserProfile] = useState<Profile | null>(null);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -58,23 +62,36 @@ export default function GroupDetail() {
   }, [user, id]);
 
   const fetchGroupData = async () => {
-    if (!id) return;
+    if (!id || !user?.uid) return;
     
     try {
-      // Fetch group
+      // Fetch group with default currency
       const { data: groupData, error: groupError } = await supabase
         .from('groups')
-        .select('*')
+        .select('*, currencies(*)')
         .eq('id', id)
         .single();
 
       if (groupError) throw groupError;
       setGroup(groupData as Group);
+      
+      // Set default currency
+      if (groupData.currencies) {
+        setDefaultCurrency(groupData.currencies as Currency);
+      } else {
+        // Fallback to USD
+        const { data: usdCurrency } = await supabase
+          .from('currencies')
+          .select('*')
+          .eq('code', 'USD')
+          .single();
+        if (usdCurrency) setDefaultCurrency(usdCurrency as Currency);
+      }
 
-      // Fetch expenses
+      // Fetch expenses with splits
       const { data: expensesData } = await supabase
         .from('expenses')
-        .select('*')
+        .select('*, expense_splits(*)')
         .eq('group_id', id)
         .order('expense_date', { ascending: false });
 
@@ -104,9 +121,18 @@ export default function GroupDetail() {
         
         setMembers(membersWithRoles);
         
+        // Set current user profile
+        const currentProfile = profiles?.find(p => p.id === user.uid);
+        if (currentProfile) {
+          setCurrentUserProfile(currentProfile as Profile);
+        }
+        
         // Check if current user is admin
-        const currentUserMember = membersData.find(m => m.user_id === user?.id);
+        const currentUserMember = membersData.find(m => m.user_id === user?.uid);
         setIsAdmin(currentUserMember?.role === 'admin');
+
+        // Calculate balances
+        await calculateBalances(expensesData || [], profiles || [], user.uid);
       }
     } catch (error) {
       console.error('Error fetching group:', error);
@@ -114,6 +140,47 @@ export default function GroupDetail() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const calculateBalances = async (expensesData: any[], profiles: any[], currentUserId: string) => {
+    // Calculate what each person owes/is owed relative to the current user
+    const balanceMap: Record<string, number> = {};
+
+    for (const expense of expensesData) {
+      const paidBy = expense.paid_by;
+      const splits = expense.expense_splits || [];
+
+      for (const split of splits) {
+        const owedBy = split.user_id;
+        const amount = Number(split.amount);
+
+        if (paidBy === currentUserId && owedBy !== currentUserId) {
+          // Current user paid, someone else owes them
+          balanceMap[owedBy] = (balanceMap[owedBy] || 0) + amount;
+        } else if (owedBy === currentUserId && paidBy !== currentUserId) {
+          // Current user owes someone else
+          balanceMap[paidBy] = (balanceMap[paidBy] || 0) - amount;
+        }
+      }
+    }
+
+    // Convert to balance items
+    const balanceItems: { person: Profile; amount: number; direction: 'owe' | 'owed' }[] = [];
+    
+    for (const [userId, amount] of Object.entries(balanceMap)) {
+      if (Math.abs(amount) > 0.01) {
+        const person = profiles.find(p => p.id === userId);
+        if (person) {
+          balanceItems.push({
+            person: person as Profile,
+            amount: Math.abs(amount),
+            direction: amount > 0 ? 'owed' : 'owe',
+          });
+        }
+      }
+    }
+
+    setBalances(balanceItems);
   };
 
   if (authLoading || loading || !user) {
@@ -201,12 +268,15 @@ export default function GroupDetail() {
             <Card className="glass-card border-0">
               <CardContent className="pt-6">
                 <div className="flex items-center gap-4">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-100 dark:bg-emerald-900/30">
-                    <TrendingUp className="h-6 w-6 text-emerald-600 dark:text-emerald-400" />
+                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-green-100 dark:bg-green-900/30">
+                    <TrendingUp className="h-6 w-6 text-green-600 dark:text-green-400" />
                   </div>
                   <div>
                     <p className="text-sm text-muted-foreground">You're owed</p>
-                    <p className="text-2xl font-bold money-positive">$0.00</p>
+                    <p className="text-2xl font-bold text-green-600 dark:text-green-400">
+                      {defaultCurrency?.symbol || '$'}
+                      {balances.filter(b => b.direction === 'owed').reduce((sum, b) => sum + b.amount, 0).toFixed(2)}
+                    </p>
                   </div>
                 </div>
               </CardContent>
@@ -220,7 +290,10 @@ export default function GroupDetail() {
                   </div>
                   <div>
                     <p className="text-sm text-muted-foreground">You owe</p>
-                    <p className="text-2xl font-bold money-negative">$0.00</p>
+                    <p className="text-2xl font-bold text-red-600 dark:text-red-400">
+                      {defaultCurrency?.symbol || '$'}
+                      {balances.filter(b => b.direction === 'owe').reduce((sum, b) => sum + b.amount, 0).toFixed(2)}
+                    </p>
                   </div>
                 </div>
               </CardContent>
@@ -235,7 +308,7 @@ export default function GroupDetail() {
                   <div>
                     <p className="text-sm text-muted-foreground">Total Spent</p>
                     <p className="text-2xl font-bold">
-                      ${expenses.reduce((sum, e) => sum + Number(e.amount), 0).toFixed(2)}
+                      {defaultCurrency?.symbol || '$'}{expenses.reduce((sum, e) => sum + Number(e.amount), 0).toFixed(2)}
                     </p>
                   </div>
                 </div>
@@ -316,17 +389,26 @@ export default function GroupDetail() {
             </TabsContent>
 
             <TabsContent value="balances">
-              <Card className="border-dashed">
-                <CardContent className="flex flex-col items-center justify-center py-12">
-                  <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted mb-4">
-                    <Wallet className="h-8 w-8 text-muted-foreground" />
-                  </div>
-                  <h3 className="text-lg font-medium mb-2">All settled up!</h3>
-                  <p className="text-muted-foreground text-center">
-                    No outstanding balances in this group
-                  </p>
-                </CardContent>
-              </Card>
+              {defaultCurrency && currentUserProfile && (
+                <BalanceCard
+                  balances={balances}
+                  currency={defaultCurrency}
+                  groupId={id!}
+                  currentUserId={user.uid}
+                  currentUserProfile={currentUserProfile}
+                  onSettlementComplete={fetchGroupData}
+                />
+              )}
+              {!defaultCurrency && (
+                <Card className="border-dashed">
+                  <CardContent className="flex flex-col items-center justify-center py-12">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted mb-4">
+                      <Wallet className="h-8 w-8 text-muted-foreground" />
+                    </div>
+                    <h3 className="text-lg font-medium mb-2">Loading balances...</h3>
+                  </CardContent>
+                </Card>
+              )}
             </TabsContent>
 
             <TabsContent value="members">
